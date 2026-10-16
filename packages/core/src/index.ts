@@ -1,7 +1,16 @@
 export * from './types.js';
 export { AdminError, isAdminError, toSafeError, type AdminErrorCode, type SafeErrorBody } from './errors.js';
 export { checkPermission, createRolePolicy, isValidPermission, normalizeActor } from './permissions.js';
-export { createRegistry, defineAdminModule, defineResource, RegistryError, type AdminRegistry, type RegisteredResource } from './registry.js';
+export {
+  createRegistry,
+  defineAdminModule,
+  defineMetric,
+  defineResource,
+  RegistryError,
+  type AdminRegistry,
+  type RegisteredMetric,
+  type RegisteredResource,
+} from './registry.js';
 export { parseListQuery, parseRecordId, sanitizeRecord, DEFAULT_LIMIT, MAX_LIMIT } from './query.js';
 export { buildAuditEvent, createMemoryAuditSink, redactMetadata, sanitizeAuditString, type AuditEventInput } from './audit.js';
 export {
@@ -11,5 +20,6 @@ export {
   type AdminOperation,
   type AdminRequest,
   type AdminResponse,
+  type DescribedMetric,
   type DescribedResource,
 } from './engine.js';

@@ -20,11 +20,15 @@ export type AdminContext = {
 /** Permission identifiers are explicit `resource.action` strings, e.g. `users.read`. */
 export type Permission = `${string}.${string}`;
 
-/** What is being accessed. `recordId` is present for single-record reads. */
+/**
+ * What is being accessed. `recordId` is present for single-record reads.
+ * For metrics, `kind` is 'metric' and `resourceId` is the metric id.
+ */
 export type AuthorizationTarget = {
   readonly moduleId: string;
   readonly resourceId: string;
   readonly recordId?: string;
+  readonly kind?: 'metric';
 };
 
 export type AuthorizeInput = {
@@ -89,14 +93,50 @@ export type AdminResource<T extends Record<string, unknown> = Record<string, unk
   readonly timeoutMs?: number;
 };
 
+// ---------- Metrics ----------
+
+/** How a dashboard should format the value. `percent` values are ratios: 0.564 → "56.4%". */
+export type MetricFormat = 'number' | 'currency' | 'percent';
+
+/** `stat`: headline number (+ sparkline if a series is given). `bar` / `line`: a chart panel. */
+export type MetricDisplay = 'stat' | 'bar' | 'line';
+
+export type MetricPoint = { readonly x: string; readonly y: number };
+
+/** What a metric's `load` returns: already-computed aggregates, never raw rows. */
+export type MetricResult = {
+  readonly value: number;
+  /** The comparison value for the previous period, if any. */
+  readonly previous?: number;
+  /** Up to 1000 points, in display order. */
+  readonly series?: readonly MetricPoint[];
+};
+
+export type AdminMetric = {
+  readonly id: string;
+  readonly label: string;
+  /** Short plain-language note shown under the label, e.g. "Last 30 days". */
+  readonly description?: string;
+  /** Must be declared by the module. */
+  readonly permission: Permission;
+  readonly display?: MetricDisplay;
+  readonly format?: MetricFormat;
+  /** ISO 4217 code for `currency` format, e.g. "USD". */
+  readonly currency?: string;
+  readonly load: (ctx: AdminContext) => Promise<MetricResult>;
+  /** Default 10s. */
+  readonly timeoutMs?: number;
+};
+
 // ---------- Modules ----------
 
 export type AdminModule = {
   readonly id: string;
   readonly label: string;
-  /** Every permission the module's resources/actions use must be declared here. */
+  /** Every permission the module's resources/metrics use must be declared here. */
   readonly permissions: readonly Permission[];
   readonly resources: readonly AdminResource[];
+  readonly metrics?: readonly AdminMetric[];
   /** Defaults to true. A disabled module registers no routes and no navigation. */
   readonly enabled?: boolean;
 };

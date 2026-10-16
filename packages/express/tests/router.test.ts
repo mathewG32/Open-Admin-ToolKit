@@ -237,6 +237,27 @@ describe('modules and navigation', () => {
   });
 });
 
+describe('metrics route', () => {
+  it('serves GET /metrics/:id with the same auth pipeline, and 405 for writes', async () => {
+    const app = express();
+    app.use(BASE, createExpressAdmin({
+      authenticate: hostAuthenticate,
+      authorize: createRolePolicy({ admin: ['metrics.read'] }),
+      audit: () => {},
+      modules: [defineAdminModule({
+        id: 'm', label: 'M', permissions: ['metrics.read'], resources: [],
+        metrics: [{ id: 'active', label: 'Active', permission: 'metrics.read', load: async () => ({ value: 7 }) }],
+      })],
+    }));
+    expect((await request(app).get(`${BASE}/metrics/active`)).status).toBe(401);
+    expect((await request(app).get(`${BASE}/metrics/active`).set(asSupport)).status).toBe(403);
+    const ok = await request(app).get(`${BASE}/metrics/active`).set(asAdmin);
+    expect(ok.status).toBe(200);
+    expect(ok.body.data).toEqual({ value: 7 });
+    expect((await request(app).post(`${BASE}/metrics/active`).set(asAdmin)).status).toBe(405);
+  });
+});
+
 describe('audit trail', () => {
   it('records successes, denials, and unauthenticated attempts without secrets', async () => {
     const { app, events } = buildApp();

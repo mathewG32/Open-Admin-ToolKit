@@ -93,6 +93,18 @@ Output values must match the declared field type. Mismatches are sent as `null` 
 
 After validation, the registry keeps **deeply frozen snapshots** of modules, resources, and field definitions, so later mutation of the host's original objects has no effect. At startup the registry checks: unique module IDs, unique resource IDs across modules, safe ID patterns, that each resource's read permission is declared by its module, that `idField` is among the declared fields, and valid field types. **Disabled modules are still validated**, but they are not indexed. Their resources then return the same `404` as a resource that never existed, and they don't appear in navigation.
 
+### 5.4a Metrics
+
+```ts
+defineMetric({ id, label, description?, permission, display?: 'stat' | 'bar' | 'line', format?: 'number' | 'currency' | 'percent', currency?, load, timeoutMs? })
+```
+
+- `load(ctx)` returns **already-computed aggregates**: `{ value: number, previous?: number, series?: { x: string, y: number }[] }`. Results are strictly validated: values must be finite, a series can have at most 1000 points, and `x` is 1–64 characters with no control characters. Anything else gets a `500` (reported). Unknown keys are dropped, so a metric can't accidentally ship raw rows.
+- `percent` values are ratios (0.25 means 25%). `currency` requires an ISO 4217 code.
+- `permission` must be declared by the module. Authorization receives `target: { moduleId, resourceId: metricId, kind: 'metric' }`.
+- Metric ids are a separate namespace from resource ids. Disabled modules expose neither.
+- Route: `GET /metrics/:metricId`. Audited as `<metricId>.metric`.
+
 ### 5.5 Errors
 
 | Code | HTTP | When |

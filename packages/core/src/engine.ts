@@ -2,7 +2,7 @@ import { buildAuditEvent, type AuditEventInput } from './audit.js';
 import { AdminError, isAdminError, toSafeError, type SafeErrorBody } from './errors.js';
 import { checkPermission, normalizeActor } from './permissions.js';
 import { parseListQuery, parseRecordId, sanitizeRecord } from './query.js';
-import { createRegistry, type AdminRegistry, type RegisteredResource } from './registry.js';
+import { createRegistry, type AdminRegistry, type RegisteredMetric, type RegisteredResource } from './registry.js';
 import type {
   AdminActor,
   AdminContext,
@@ -12,6 +12,10 @@ import type {
   AuditSink,
   AuthorizeFn,
   FieldMap,
+  MetricDisplay,
+  MetricFormat,
+  MetricPoint,
+  MetricResult,
 } from './types.js';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
@@ -71,7 +75,46 @@ export type AdminEngineOptions = {
 export type AdminOperation =
   | { kind: 'describe' }
   | { kind: 'list'; resourceId: string; query: Readonly<Record<string, unknown>> }
-  | { kind: 'get'; resourceId: string; recordId: unknown };
+  | { kind: 'get'; resourceId: string; recordId: unknown }
+  | { kind: 'metric'; metricId: string };
+
+export type DescribedMetric = {
+  id: string;
+  label: string;
+  description?: string;
+  display: MetricDisplay;
+  format: MetricFormat;
+  currency?: string;
+};
+
+const MAX_SERIES_POINTS = 1000;
+// eslint-disable-next-line no-control-regex
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/;
+
+/** Strictly validates a host metric result. Returns a clean copy, or null if malformed. */
+function normalizeMetricResult(raw: unknown): MetricResult | null {
+  if (typeof raw !== 'object' || raw === null) return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.value !== 'number' || !Number.isFinite(r.value)) return null;
+  const out: { value: number; previous?: number; series?: MetricPoint[] } = { value: r.value };
+  if (r.previous !== undefined && r.previous !== null) {
+    if (typeof r.previous !== 'number' || !Number.isFinite(r.previous)) return null;
+    out.previous = r.previous;
+  }
+  if (r.series !== undefined) {
+    if (!Array.isArray(r.series) || r.series.length > MAX_SERIES_POINTS) return null;
+    const series: MetricPoint[] = [];
+    for (const p of r.series) {
+      if (typeof p !== 'object' || p === null) return null;
+      const { x, y } = p as Record<string, unknown>;
+      if (typeof x !== 'string' || x.length === 0 || x.length > 64 || CONTROL_CHARS.test(x)) return null;
+      if (typeof y !== 'number' || !Number.isFinite(y)) return null;
+      series.push({ x, y });
+    }
+    out.series = series;
+  }
+  return out;
+}
 
 export type AdminRequest = {
   /** Calls the host's identity verification. Return null/undefined when there is no session. */
@@ -218,7 +261,7 @@ export function createAdminEngine(options: AdminEngineOptions): AdminEngine {
   }
 
   async function describe(actor: AdminActor, req: AdminRequest) {
-    const modules: { id: string; label: string; resources: DescribedResource[] }[] = [];
+    const modules: { id: string; label: string; resources: DescribedResource[]; metrics: DescribedMetric[] }[] = [];
     for (const mod of registry.modules) {
       const resources: DescribedResource[] = [];
       for (const res of mod.resources) {
@@ -231,10 +274,63 @@ export function createAdminEngine(options: AdminEngineOptions): AdminEngine {
           resources.push({ id: res.id, label: res.label, idField: res.idField, fields: res.fields, supportsGet: typeof res.get === 'function' });
         }
       }
+      const metrics: DescribedMetric[] = [];
+      for (const m of mod.metrics ?? []) {
+        const allowed = await checkPermission(authorizeFor(req), {
+          actor,
+          permission: m.permission,
+          target: { moduleId: mod.id, resourceId: m.id, kind: 'metric' },
+        });
+        if (allowed) {
+          const d: DescribedMetric = { id: m.id, label: m.label, display: m.display ?? 'stat', format: m.format ?? 'number' };
+          if (m.description !== undefined) d.description = m.description;
+          if (m.currency !== undefined) d.currency = m.currency;
+          metrics.push(d);
+        }
+      }
       // Navigation is a convenience only; every data request is authorized again.
-      if (resources.length > 0) modules.push({ id: mod.id, label: mod.label, resources });
+      if (resources.length > 0 || metrics.length > 0) modules.push({ id: mod.id, label: mod.label, resources, metrics });
     }
     return { actor: { id: actor.id, roles: actor.roles }, modules, requestId: req.requestId };
+  }
+
+  async function metric(actor: AdminActor, req: AdminRequest, op: Extract<AdminOperation, { kind: 'metric' }>) {
+    const reg: RegisteredMetric | undefined = typeof op.metricId === 'string' ? registry.getMetric(op.metricId) : undefined;
+    if (!reg) {
+      await writeAudit(
+        { actorId: actor.id, action: 'admin.metric.lookup', outcome: 'denied', requestId: req.requestId, tenantId: actor.tenantId, metadata: { reason: 'unknown_metric' } },
+        false,
+      );
+      throw new AdminError('NOT_FOUND');
+    }
+    const m = reg.metric;
+    const action = `${m.id}.metric`;
+    const allowed = await checkPermission(authorizeFor(req), {
+      actor,
+      permission: m.permission,
+      target: { moduleId: reg.module.id, resourceId: m.id, kind: 'metric' },
+    });
+    if (!allowed) {
+      await writeAudit(
+        { actorId: actor.id, action, outcome: 'denied', requestId: req.requestId, resourceType: m.id, tenantId: actor.tenantId, metadata: { permission: m.permission } },
+        false,
+      );
+      throw new AdminError('FORBIDDEN');
+    }
+    const raw = await runHost(actor, req, m, action, undefined, (ctx) => m.load(ctx));
+    const result = normalizeMetricResult(raw);
+    if (!result) {
+      reportInternal(
+        new Error(`Metric "${m.id}" load() must return { value: finite number, previous?: finite number, series?: { x: string, y: finite number }[] (max ${MAX_SERIES_POINTS}) }.`),
+        req.requestId,
+      );
+      throw new AdminError('INTERNAL');
+    }
+    await writeAudit(
+      { actorId: actor.id, action, outcome: 'success', requestId: req.requestId, resourceType: m.id, tenantId: actor.tenantId },
+      true,
+    );
+    return { data: result, requestId: req.requestId };
   }
 
   async function authorizeResource(
@@ -283,9 +379,17 @@ export function createAdminEngine(options: AdminEngineOptions): AdminEngine {
     return reg;
   }
 
-  async function runHost<T>(actor: AdminActor, req: AdminRequest, reg: RegisteredResource, action: string, recordId: string | undefined, fn: (ctx: AdminContext) => Promise<T>): Promise<T> {
+  /** `unit` is the resource or metric being run: its id is the audit resourceType. */
+  async function runHost<T>(
+    actor: AdminActor,
+    req: AdminRequest,
+    unit: { readonly id: string; readonly timeoutMs?: number | undefined },
+    action: string,
+    recordId: string | undefined,
+    fn: (ctx: AdminContext) => Promise<T>,
+  ): Promise<T> {
     try {
-      return await withTimeout(req.signal, reg.resource.timeoutMs ?? DEFAULT_TIMEOUT_MS, (signal) => fn(contextFor(actor, req, signal)));
+      return await withTimeout(req.signal, unit.timeoutMs ?? DEFAULT_TIMEOUT_MS, (signal) => fn(contextFor(actor, req, signal)));
     } catch (err) {
       // Host handlers may intentionally throw NOT_FOUND / FORBIDDEN / BAD_REQUEST AdminErrors.
       const safe = isAdminError(err) && err.code !== 'INTERNAL' ? err : new AdminError('INTERNAL');
@@ -296,7 +400,7 @@ export function createAdminEngine(options: AdminEngineOptions): AdminEngine {
           action,
           outcome: safe.code === 'FORBIDDEN' ? 'denied' : 'error',
           requestId: req.requestId,
-          resourceType: reg.resource.id,
+          resourceType: unit.id,
           resourceId: recordId,
           tenantId: actor.tenantId,
           metadata: { errorCode: safe.code },
@@ -323,7 +427,7 @@ export function createAdminEngine(options: AdminEngineOptions): AdminEngine {
       throw err;
     }
 
-    const result = await runHost(actor, req, reg, action, undefined, (ctx) => reg.resource.list(ctx, query));
+    const result = await runHost(actor, req, reg.resource, action, undefined, (ctx) => reg.resource.list(ctx, query));
     if (typeof result !== 'object' || result === null || !Array.isArray(result.items)) {
       reportInternal(new Error(`Resource "${reg.resource.id}" list() must return { items: [] }.`), req.requestId);
       throw new AdminError('INTERNAL');
@@ -366,7 +470,7 @@ export function createAdminEngine(options: AdminEngineOptions): AdminEngine {
     // Authorize with the specific record id so hosts can apply record/tenant rules.
     await authorizeResource(actor, req, reg, action, recordId);
 
-    const record = await runHost(actor, req, reg, action, recordId, (ctx) => getter(ctx, recordId));
+    const record = await runHost(actor, req, reg.resource, action, recordId, (ctx) => getter(ctx, recordId));
     if (record === null || record === undefined) {
       await writeAudit(
         { actorId: actor.id, action, outcome: 'error', requestId: req.requestId, resourceType: reg.resource.id, resourceId: recordId, tenantId: actor.tenantId, metadata: { errorCode: 'NOT_FOUND' } },
@@ -396,6 +500,9 @@ export function createAdminEngine(options: AdminEngineOptions): AdminEngine {
           break;
         case 'get':
           body = await get(actor, req, op);
+          break;
+        case 'metric':
+          body = await metric(actor, req, op);
           break;
         default:
           throw new AdminError('NOT_FOUND');

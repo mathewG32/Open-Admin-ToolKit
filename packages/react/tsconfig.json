@@ -1,0 +1,13 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "jsx": "react-jsx",
+    "types": ["node"],
+    "paths": {
+      "@openadminkit/core": ["../core/src/index.ts"]
+    }
+  },
+  "include": ["src", "tests"]
+}

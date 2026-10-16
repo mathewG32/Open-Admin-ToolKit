@@ -2,52 +2,50 @@
 
 > **Build your product. We provide the admin foundation.**
 
-A small, self-hosted admin toolkit for TypeScript/Express apps. You plug in **your** session check, **your** permission rules, and **your** data. OpenAdmin Kit gives you authenticated, deny-by-default, audited admin API routes. You don't have to wire up auth checks, pagination limits, field filtering, and audit logging again for every project.
+A small, self-hosted admin toolkit for TypeScript/Express apps. You plug in **your** session check, **your** permission rules, and **your** data. OpenAdmin Kit gives you authenticated, deny-by-default, audited admin API routes, plus an optional React dashboard that shows each role only what it can read.
 
-> ⚠️ **Pre-alpha (0.0.x).** This is a working proof of concept, not a production-ready package. It has not had an independent security review. APIs will change. The package names below are not published to npm yet.
+> ⚠️ **Pre-alpha (0.0.x).** This is a working foundation, not a production-ready package. It has not had an independent security review, the APIs will change, and nothing is published to npm yet.
 
-## What works today
+![Dashboard overview in dark mode: a strip of headline numbers with trend lines, a daily revenue bar chart, and a signups line chart](docs/screenshots/overview-dark.png)
 
-- **Headless core** (`@openadminkit/core`): module registry, deny-by-default authorization, bounded list/get queries, field allowlisting, safe errors, timeouts, and redacted audit events.
-- **Express adapter** (`@openadminkit/express`): a router you mount under your own path, with `401` / `403` / `404` / `400` / `503` handling, request IDs, `no-store` headers, and `405` for any write method.
-- **Example app** (`examples/express-basic`): cookie sessions, three staff roles, 120 fake users, a metrics module, and an audit-log viewer.
-- **122 tests** covering the security cases from the blueprint's threat model, plus a **packed-package test** that installs the real tarballs into an app outside the repo.
+## Packages
 
-Not built yet: the React dashboard, mutating actions, the `@openadminkit/testing` package, and Next.js/Prisma adapters. See [ROADMAP.md](ROADMAP.md).
+| Package | What it does | Depends on |
+|---|---|---|
+| `@openadminkit/core` | Registry, deny-by-default authorization, bounded queries, field allowlisting, metrics, audit events | Nothing at runtime |
+| `@openadminkit/express` | Mounts the admin API in your Express app | core, Express (peer) |
+| `@openadminkit/react` | Optional dashboard: navigation, metric tiles and charts, tables, record drawer | core types, React (peer) |
 
-## Quickstart (about 2 minutes)
+The core never imports Express or React, and the dashboard is just another API client. Its permissions come from the server.
 
-You need Node 20+ and pnpm 9+.
+## Try the demo (about 2 minutes)
+
+You need **Node 22.13+** (for built-in SQLite) and **pnpm 9+**.
 
 ```bash
 pnpm install
 pnpm build
-pnpm example
+pnpm demo
 ```
 
-Open http://localhost:3000, click **Log in as viewer**, then **Users (5)**. The response is `403`. Log in as **admin** and try again.
+Open http://localhost:3000 and sign in as one of the three demo staff accounts:
 
-From the terminal:
+| Account | Sees |
+|---|---|
+| **Avery, admin** | Everything, including revenue and the audit log |
+| **Sky, support** | Customers and orders, but no revenue numbers and no audit log |
+| **Ari, analyst** | Metrics only, including revenue, and no customer records |
 
-```bash
-curl -i localhost:3000/internal/admin/api/resources/users          # 401
+The demo (`examples/express-sqlite`) is a fictional reseller-inventory SaaS called *Shelfwise*, with 480 customers and their orders in SQLite. It shows parameterized SQL, keyset pagination, a persisted audit log, and SQL-computed metrics. Set `DB_FILE=./shelfwise.db` to keep data between restarts.
 
-curl -c jar -H 'Content-Type: application/json' -d '{"as":"support"}' localhost:3000/login
-curl -b jar 'localhost:3000/internal/admin/api/resources/users?limit=3&filter[status]=suspended'   # 200
-curl -b jar  localhost:3000/internal/admin/api/resources/audit-events                              # 403
-```
+There's also a minimal API-only example with in-memory data: `pnpm example`.
 
-Run every check:
-
-```bash
-pnpm check       # build + typecheck + lint + test
-pnpm test:pack   # pack, install into an external app, typecheck, and hit it over HTTP
-```
+![Orders table in light mode with customer and status filters, sortable amount and date columns, and status tags](docs/screenshots/orders-light.png)
 
 ## Adding it to your own Express app
 
 ```ts
-import { createRolePolicy, defineAdminModule, defineResource } from '@openadminkit/core';
+import { createRolePolicy, defineAdminModule, defineMetric, defineResource } from '@openadminkit/core';
 import { createExpressAdmin } from '@openadminkit/express';
 
 const users = defineResource({
@@ -64,48 +62,81 @@ const users = defineResource({
   get: (ctx, id) => myUserService.findForAdmin(ctx.actor, id),         // return null if missing OR out of scope
 });
 
+const activeUsers = defineMetric({
+  id: 'active-users',
+  label: 'Active users',
+  permission: 'metrics.read',
+  load: async () => ({ value: await myStats.activeUsers(), previous: await myStats.activeUsersLastMonth() }),
+});
+
 app.use('/internal/admin/api', createExpressAdmin({
   authenticate: (req) => {               // your existing session/JWT check
     const s = req.session?.user;
     return s ? { id: s.id, roles: s.roles } : null;
   },
-  authorize: createRolePolicy({ admin: ['users.read'] }),   // or your own (input) => boolean
-  audit: (event) => myAuditTable.insert(event),             // storage you own
-  modules: [defineAdminModule({ id: 'users', label: 'Users', permissions: ['users.read'], resources: [users] })],
+  authorize: createRolePolicy({ admin: ['users.read', 'metrics.read'] }),   // or your own (input) => boolean
+  audit: (event) => myAuditTable.insert(event),                            // storage you own
+  modules: [
+    defineAdminModule({ id: 'users', label: 'Users', permissions: ['users.read'], resources: [users] }),
+    defineAdminModule({ id: 'stats', label: 'Stats', permissions: ['metrics.read'], resources: [], metrics: [activeUsers] }),
+  ],
 }));
 ```
 
-[docs/getting-started.md](docs/getting-started.md) walks through this step by step.
+Then, optionally, add the dashboard to a page your app already protects:
+
+```tsx
+import { AdminApp } from '@openadminkit/react';
+import '@openadminkit/react/styles.css';
+
+<AdminApp apiBase="/internal/admin/api" appName="My app" loginUrl="/login" />
+```
+
+- [docs/getting-started.md](docs/getting-started.md) walks through the backend step by step.
+- [docs/dashboard.md](docs/dashboard.md) covers the React package: theming, content security policy, and what each screen does.
 
 ## API surface
 
 | Route | Purpose |
 |---|---|
-| `GET /` | The modules and resources this actor can read (for navigation) |
+| `GET /` | Modules, resources, and metrics this actor can read (drives navigation) |
 | `GET /resources/:id?limit=&cursor=&sort=&filter[field]=` | Bounded list, 1–100 rows per page (default 25) |
 | `GET /resources/:id/:recordId` | Single record |
+| `GET /metrics/:id` | Pre-computed aggregate: `{ value, previous?, series? }` |
+
+Every other method returns `405`. Write actions are planned (RFC-002), but they aren't built.
 
 ## Security model
 
-- **The backend is the trust boundary.** Hiding a button never grants or blocks anything. Every request re-runs `authenticate` and `authorize`.
-- **Deny by default.** Only a literal `true` from your `authorize` function grants access. Throws, rejections, `undefined`, and `"yes"` all deny.
-- **Allowlisted output.** Records are projected onto the declared `fields`, so a `passwordHash` your query happens to return is dropped.
-- **Strict input.** Unknown params, undeclared filters and sorts, repeated params, oversized values, and control characters all get `400`.
-- **Typed output.** Values must match their declared type, or they're sent as `null`.
-- **Bounded callbacks.** A hanging session store, policy check, or audit sink can't hang the request. A hanging policy check means denial.
-- **Frozen config.** Definitions are snapshotted at startup, so mutating them later does nothing.
-- **Audit fail-closed.** If a success event can't be written, the data isn't returned (`503`). This is configurable.
-- **No raw errors.** Database and provider errors become a generic `500`. Your `onInternalError` hook gets the real error.
+- **The backend is the trust boundary.** The dashboard hides what a role can't read, but that's only a convenience. Every request re-runs `authenticate` and `authorize`.
+- **Deny by default.** Only a literal `true` from your `authorize` function grants access. Throws, rejections, timeouts, and `"yes"` all deny.
+- **Allowlisted, typed output.** Records are projected onto the declared `fields`, so a `passwordHash` your query happens to return is dropped. Values must match their declared type, or they're sent as `null`. Metric results are strictly validated.
+- **Strict input.** Unknown params, undeclared filters and sorts, repeated params, oversized values, and control characters all get a `400`.
+- **Bounded callbacks.** A hanging session store, policy check, or audit sink can't hang the request.
+- **Frozen config.** Definitions are snapshotted at startup.
+- **Audit fail-closed.** If a success event can't be written, the data isn't returned (`503`).
+- **No raw errors.** Database errors become a generic `500`. Your `onInternalError` hook gets the real error.
+- **Dashboard:** text is rendered as text with no `innerHTML`, it works under a strict CSP with no inline scripts or styles, and requests use `credentials: 'same-origin'`.
 
 Read [docs/security.md](docs/security.md) for the threat-model status and known gaps.
+
+## Development
+
+```bash
+pnpm check       # build + typecheck + lint + all tests
+pnpm test:pack   # pack all 3 packages, install them into an app outside the repo, typecheck, run, and render
+```
 
 ## Repository layout
 
 ```
-packages/core       contracts, registry, engine (no Express/React dependency)
-packages/express    Express router
-examples/express-basic
-docs/               RFC-001, getting started, security
+packages/core        contracts, registry, engine (no Express/React dependency)
+packages/express     Express router
+packages/react       optional dashboard
+examples/express-sqlite   full demo: SQLite + dashboard
+examples/express-basic    minimal API-only demo
+docs/                RFC-001, getting started, dashboard, security
+scripts/pack-test.mjs
 ```
 
 ## License

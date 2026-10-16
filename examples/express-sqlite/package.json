@@ -1,0 +1,22 @@
+{
+  "name": "express-sqlite-example",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13"
+  },
+  "scripts": {
+    "build:client": "node scripts/build-client.mjs",
+    "start": "node scripts/build-client.mjs && tsx src/server.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@openadminkit/core": "workspace:*",
+    "@openadminkit/express": "workspace:*",
+    "@openadminkit/react": "workspace:*",
+    "express": "^5.1.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1"
+  }
+}

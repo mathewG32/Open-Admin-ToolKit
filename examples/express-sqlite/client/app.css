@@ -1,0 +1,26 @@
+body { margin: 0; }
+
+/* Demo-only styles for the sign-in page. The dashboard itself uses @openadminkit/react/styles.css. */
+
+.oa-login { max-width: 460px; width: 100%; display: flex; flex-direction: column; gap: 14px; padding: 28px; }
+.oa-login-title { font-size: 20px; font-weight: 650; letter-spacing: -0.015em; }
+.oa-login-body { color: var(--oa-ink-2); }
+.oa-login-options { display: flex; flex-direction: column; gap: 8px; }
+.oa-login-option {
+  font: inherit;
+  text-align: left;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 12px 14px;
+  border-radius: var(--oa-radius-sm);
+  border: 1px solid var(--oa-rule);
+  background: var(--oa-panel-2);
+  color: var(--oa-ink);
+  cursor: pointer;
+}
+.oa-login-option:hover { border-color: var(--oa-accent); }
+.oa-login-option:focus-visible { outline: 2px solid var(--oa-focus); outline-offset: 2px; }
+.oa-login-option span { color: var(--oa-muted); font-size: 13px; }
+.oa-login-error { color: var(--oa-bad-ink); }
+.oa-login-error:empty { display: none; }

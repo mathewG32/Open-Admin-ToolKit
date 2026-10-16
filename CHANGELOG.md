@@ -4,6 +4,15 @@ All notable changes to this project will be documented here. This project will f
 
 ## [Unreleased] — 0.0.1-prealpha
 
+### Added: dashboard, metrics, and SQLite demo
+- **`@openadminkit/react`**: an optional dashboard driven entirely by `GET /`. It has a stat strip with sparklines and change versus the previous period, bar and line charts with hover and keyboard tooltips and a table view, resource tables with server-side filters, sorting, and keyset pagination, a record drawer, and per-panel loading and error states. Dark and light themes use `--oa-*` tokens and work under a strict CSP.
+- **Metrics contract (core + express):** `defineMetric({ id, label, permission, display, format, currency, load })` and `GET /metrics/:id`. Results are strictly validated (`value`, optional `previous`, `series` of at most 1000 points), unknown keys are dropped, and access is authorized with `target.kind = 'metric'` and audited. `describe` now lists metrics per module.
+- **`examples/express-sqlite`** (`pnpm demo`): a fictional SaaS on Node's built-in SQLite with 480 customers and their orders, three staff roles, parameterized SQL through an allowlisted list builder (`sql.ts`), keyset cursors, a LIKE-escaped prefix search, an audit log persisted to a table and readable in the dashboard, SQL-computed metrics, and a strict CSP. It has 21 tests, including SQL-injection, cursor-forgery, and live role-change checks.
+- The pack test now packs and installs all three packages, and server-renders `AdminApp` from the installed tarball.
+
+### Changed
+- Minimum Node is now **22.13** (Node 20 reached end-of-life in April 2026, and built-in SQLite needs 22.13+). The CI matrix is 22 and 24.
+
 ### Security
 - **Docs (P0):** the tenant-scoping recipe in `getting-started.md` spread `...query.filters` over the tenant condition, so it could be overridden by `filter[tenantId]` when that field was declared filterable. The recipe now ANDs the server scope separately and fails closed without a tenant. Regression tests were added for both the rejected filter and the safe pattern.
 - `authenticate`, `authorize`, and `audit` are now bounded by `callbackTimeoutMs` (default 5000). On a hang, authenticate returns 504, authorize denies, and audit is treated as a sink failure.

@@ -52,6 +52,7 @@ function disconnectSignal(res: Response): AbortSignal {
  *   GET /                          → resources this actor may read (navigation)
  *   GET /resources/:resourceId     → bounded, filtered list
  *   GET /resources/:resourceId/:id → single record
+ *   GET /metrics/:metricId         → pre-computed aggregate (+ optional series)
  *
  * Any other path or method under the mount point returns a safe JSON 404/405.
  */
@@ -106,12 +107,16 @@ export function createExpressAdminFromEngine(
     resourceId: String(req.params.resourceId),
     recordId: req.params.recordId,
   })));
+  router.get('/metrics/:metricId', run((req) => ({
+    kind: 'metric',
+    metricId: String(req.params.metricId),
+  })));
 
   // Mutations are not part of the alpha. Anything else under the mount point gets a
   // safe JSON response instead of falling through to the host app's routes.
   router.use((req, res) => {
     const requestId = res.locals.openAdminRequestId as string;
-    const known = /^\/(resources\/[^/]+(\/[^/]+)?)?\/?$/.test(req.path);
+    const known = /^\/(resources\/[^/]+(\/[^/]+)?|metrics\/[^/]+)?\/?$/.test(req.path);
     if (known && req.method !== 'GET' && req.method !== 'HEAD') {
       res.set('Allow', 'GET, HEAD');
       res.status(405).json({ error: { code: 'METHOD_NOT_ALLOWED', message: 'Method not allowed.', requestId } });

@@ -7,10 +7,10 @@ Thanks for your interest! OpenAdmin Kit is early, so the most useful contributio
 ```bash
 pnpm install
 pnpm check      # build + typecheck + lint + test
-pnpm example    # http://localhost:3000
+pnpm demo       # http://localhost:3000 (SQLite + dashboard)
 ```
 
-Node 20+ and pnpm 9+ are required.
+Node 22.13+ and pnpm 9+ are required.
 
 ## Ground rules
 

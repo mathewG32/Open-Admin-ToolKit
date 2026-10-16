@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
 const root = resolve(import.meta.dirname, '..');
-const packages = ['core', 'express'];
+const packages = ['core', 'express', 'react'];
 const run = (cmd, args, cwd) => execFileSync(cmd, args, { cwd, stdio: ['ignore', 'pipe', 'inherit'], encoding: 'utf8' });
 const step = (msg) => console.log(`\n▸ ${msg}`);
 
@@ -47,8 +47,10 @@ try {
     const entries = run('tar', ['-tzf', file]).trim().split('\n');
     const bad = entries.filter((e) => !allowed.test(e));
     if (bad.length) throw new Error(`${name} tarball contains unexpected files:\n  ${bad.join('\n  ')}`);
-    for (const required of ['package/dist/index.js', 'package/dist/index.d.ts', 'package/LICENSE', 'package/README.md']) {
-      if (!entries.includes(required)) throw new Error(`${name} tarball is missing ${required}`);
+    const required = ['package/dist/index.js', 'package/dist/index.d.ts', 'package/LICENSE', 'package/README.md'];
+    if (name === 'react') required.push('package/dist/styles.css');
+    for (const file of required) {
+      if (!entries.includes(file)) throw new Error(`${name} tarball is missing ${file}`);
     }
     const manifest = JSON.parse(run('tar', ['-xzOf', file, 'package/package.json']));
     if (JSON.stringify(manifest).includes('workspace:')) throw new Error(`${name} package.json still contains a workspace: protocol`);
@@ -64,16 +66,21 @@ try {
     dependencies: {
       '@openadminkit/core': `file:${tgz.core}`,
       '@openadminkit/express': `file:${tgz.express}`,
+      '@openadminkit/react': `file:${tgz.react}`,
       express: '^5.1.0',
+      react: '^19.0.0',
+      'react-dom': '^19.0.0',
     },
     // The express tarball depends on core by version; point that at the local tarball too.
     overrides: { '@openadminkit/core': '$@openadminkit/core' },
-    devDependencies: { '@types/express': '^5.0.0', '@types/node': '^22.10.0' },
+    devDependencies: { '@types/express': '^5.0.0', '@types/node': '^22.10.0', '@types/react': '^19.0.0', '@types/react-dom': '^19.0.0' },
   }, null, 2));
   run('npm', ['install', '--no-audit', '--no-fund', '--loglevel=error'], app);
   // Exactly one copy of core, and it must be OUR tarball (not something fetched from the registry).
-  if (existsSync(join(app, 'node_modules/@openadminkit/express/node_modules/@openadminkit/core'))) {
-    throw new Error('express resolved a second copy of @openadminkit/core');
+  for (const dependent of ['express', 'react']) {
+    if (existsSync(join(app, `node_modules/@openadminkit/${dependent}/node_modules/@openadminkit/core`))) {
+      throw new Error(`${dependent} resolved a second copy of @openadminkit/core`);
+    }
   }
   const lock = JSON.parse(readFileSync(join(app, 'package-lock.json'), 'utf8'));
   const resolved = lock.packages?.['node_modules/@openadminkit/core']?.resolved ?? '';
@@ -85,6 +92,12 @@ try {
 import express from 'express';
 import { createRolePolicy, defineAdminModule, defineResource, type AdminActor } from '@openadminkit/core';
 import { createExpressAdmin } from '@openadminkit/express';
+import { createElement } from 'react';
+import { AdminApp, createAdminClient, formatMetric, type AdminAppProps } from '@openadminkit/react';
+
+const props: AdminAppProps = { apiBase: '/admin/api', appName: 'Consumer', client: createAdminClient({ apiBase: '/admin/api' }) };
+export const dashboard = createElement(AdminApp, props);
+export const money: string = formatMetric(12.5, 'currency', { currency: 'USD' });
 
 const users = defineResource<{ id: string; email: string; passwordHash: string }>({
   id: 'users', label: 'Users', permissionPrefix: 'users', idField: 'id',
@@ -102,7 +115,7 @@ app.use('/admin/api', createExpressAdmin({
 export default app;
 `);
   writeFileSync(join(app, 'tsconfig.json'), JSON.stringify({
-    compilerOptions: { target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, noEmit: true, types: ['node'] },
+    compilerOptions: { target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext', strict: true, noEmit: true, lib: ['ES2022', 'DOM'], types: ['node'] },
     files: ['consumer.ts'],
   }));
   run(process.execPath, [join(root, 'node_modules', 'typescript', 'bin', 'tsc'), '-p', 'tsconfig.json'], app);
@@ -139,6 +152,21 @@ const server = app.listen(0, '127.0.0.1', async () => {
 });
 `);
   console.log(run(process.execPath, ['smoke.mjs'], app).trimEnd());
+
+  step('Server-rendering the dashboard from the installed React package');
+  writeFileSync(join(app, 'render.mjs'), `
+import { existsSync } from 'node:fs';
+import { createRequire } from 'node:module';
+import { createElement } from 'react';
+import { renderToString } from 'react-dom/server';
+import { AdminApp } from '@openadminkit/react';
+const html = renderToString(createElement(AdminApp, { apiBase: '/admin/api', appName: 'Consumer' }));
+if (!html.includes('oa-app')) throw new Error('AdminApp did not render');
+const css = createRequire(import.meta.url).resolve('@openadminkit/react/styles.css');
+if (!existsSync(css)) throw new Error('styles.css export missing');
+console.log('  AdminApp renders, styles.css export resolves: OK');
+`);
+  console.log(run(process.execPath, ['render.mjs'], app).trimEnd());
 
   console.log('\n✔ Packed-package consumer test passed');
 } finally {
