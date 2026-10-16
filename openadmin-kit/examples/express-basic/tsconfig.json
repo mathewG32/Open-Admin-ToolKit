@@ -1,0 +1,12 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "types": ["node"],
+    "paths": {
+      "@openadminkit/core": ["../../packages/core/src/index.ts"],
+      "@openadminkit/express": ["../../packages/express/src/index.ts"]
+    }
+  },
+  "include": ["src", "tests"]
+}

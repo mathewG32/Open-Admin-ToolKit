@@ -1,0 +1,21 @@
+{
+  "name": "@openadminkit/core",
+  "version": "0.0.1-prealpha",
+  "description": "Framework-agnostic contracts, registry, deny-by-default authorization and audit pipeline for OpenAdmin Kit.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": ["dist", "README.md"],
+  "sideEffects": false,
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  }
+}
