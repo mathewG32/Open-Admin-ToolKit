@@ -15,6 +15,38 @@ import type {
 } from './types.js';
 
 const DEFAULT_TIMEOUT_MS = 10_000;
+const DEFAULT_CALLBACK_TIMEOUT_MS = 5_000;
+
+/** Internal marker: a host callback (authenticate/authorize/audit) exceeded its deadline. */
+class CallbackTimeoutError extends Error {
+  constructor(readonly callback: 'authenticate' | 'authorize' | 'audit', ms: number) {
+    super(`OpenAdmin Kit: host "${callback}" callback did not settle within ${ms}ms.`);
+    this.name = 'CallbackTimeoutError';
+  }
+}
+
+/**
+ * Bounds how long we WAIT for a host callback. It cannot stop the callback's
+ * underlying work (JS has no way to cancel a promise); it only guarantees the
+ * request itself doesn't hang. Sync throws become rejections.
+ */
+async function withDeadline<T>(
+  callback: CallbackTimeoutError['callback'],
+  ms: number,
+  fn: () => T | Promise<T>,
+): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve().then(fn),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new CallbackTimeoutError(callback, ms)), ms);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 export type AdminEngineOptions = {
   /** Host authorization decision. Deny-by-default: only literal `true` grants. */
@@ -24,6 +56,12 @@ export type AdminEngineOptions = {
   modules: readonly AdminModule[];
   /** Default 'fail-closed': if a success event can't be written, the data is not returned. */
   auditFailureMode?: AuditFailureMode;
+  /**
+   * Max time (ms) to wait for each `authenticate`, `authorize`, and `audit` call. Default 5000.
+   * On expiry: authenticate → 504, authorize → deny (403), audit → treated as a sink failure.
+   * This bounds the request, not the callback's own work; see docs/security.md › Cancellation.
+   */
+  callbackTimeoutMs?: number;
   /** Called when the audit sink throws. Use it to alert; never rethrow from here. */
   onAuditFailure?: (error: unknown, event: AuditEvent) => void;
   /** Called with the real error when a client receives a generic INTERNAL/TIMEOUT error. */
@@ -96,13 +134,31 @@ export function createAdminEngine(options: AdminEngineOptions): AdminEngine {
   if (typeof options?.authorize !== 'function') throw new TypeError('createAdminEngine: "authorize" function is required.');
   if (typeof options.audit !== 'function') throw new TypeError('createAdminEngine: "audit" sink is required.');
   const failClosed = (options.auditFailureMode ?? 'fail-closed') === 'fail-closed';
+  const cbMs = options.callbackTimeoutMs ?? DEFAULT_CALLBACK_TIMEOUT_MS;
+  if (!Number.isInteger(cbMs) || cbMs < 1 || cbMs > 60_000) {
+    throw new TypeError('createAdminEngine: "callbackTimeoutMs" must be an integer between 1 and 60000.');
+  }
   const registry = createRegistry(options.modules);
+
+  /**
+   * The host policy, bounded. A timeout rejects, which checkPermission turns into a denial.
+   * Timeouts are reported (a hanging policy store is an incident); ordinary throws are not
+   * reported here because hosts sometimes throw to deny.
+   */
+  const authorizeFor = (req: AdminRequest): AuthorizeFn => async (input) => {
+    try {
+      return await withDeadline('authorize', cbMs, () => options.authorize(input));
+    } catch (err) {
+      if (err instanceof CallbackTimeoutError) reportInternal(err, req.requestId);
+      throw err;
+    }
+  };
 
   /** `critical` events (successful data access) block the response in fail-closed mode. */
   async function writeAudit(input: AuditEventInput, critical: boolean): Promise<void> {
     const event = buildAuditEvent(input);
     try {
-      await options.audit(event);
+      await withDeadline('audit', cbMs, () => options.audit(event));
     } catch (err) {
       try {
         options.onAuditFailure?.(err, event);
@@ -111,6 +167,19 @@ export function createAdminEngine(options: AdminEngineOptions): AdminEngine {
       }
       if (critical && failClosed) throw new AdminError('UNAVAILABLE');
     }
+  }
+
+  /** Reports each mismatched field once per request, so a bad column doesn't flood logs. */
+  function mismatchReporter(req: AdminRequest, reg: RegisteredResource) {
+    const seen = new Set<string>();
+    return (field: string, expected: string) => {
+      if (seen.has(field)) return;
+      seen.add(field);
+      reportInternal(
+        new Error(`Resource "${reg.resource.id}" returned a value for "${field}" that is not a ${expected}; it was sent as null.`),
+        req.requestId,
+      );
+    };
   }
 
   function reportInternal(err: unknown, requestId: string) {
@@ -124,12 +193,16 @@ export function createAdminEngine(options: AdminEngineOptions): AdminEngine {
   async function resolveActor(req: AdminRequest): Promise<AdminActor> {
     let raw: unknown;
     try {
-      raw = await req.authenticate();
+      raw = await withDeadline('authenticate', cbMs, req.authenticate);
     } catch (err) {
       reportInternal(err, req.requestId);
       // Identity could not be verified: deny. Do not reveal why.
-      await writeAudit({ actorId: null, action: 'admin.authenticate', outcome: 'error', requestId: req.requestId }, false);
-      throw new AdminError('INTERNAL');
+      const timedOut = err instanceof CallbackTimeoutError;
+      await writeAudit(
+        { actorId: null, action: 'admin.authenticate', outcome: 'error', requestId: req.requestId, metadata: { errorCode: timedOut ? 'TIMEOUT' : 'INTERNAL' } },
+        false,
+      );
+      throw new AdminError(timedOut ? 'TIMEOUT' : 'INTERNAL');
     }
     if (raw === null || raw === undefined) {
       await writeAudit({ actorId: null, action: 'admin.authenticate', outcome: 'denied', requestId: req.requestId }, false);
@@ -149,7 +222,7 @@ export function createAdminEngine(options: AdminEngineOptions): AdminEngine {
     for (const mod of registry.modules) {
       const resources: DescribedResource[] = [];
       for (const res of mod.resources) {
-        const allowed = await checkPermission(options.authorize, {
+        const allowed = await checkPermission(authorizeFor(req), {
           actor,
           permission: `${res.permissionPrefix}.read`,
           target: { moduleId: mod.id, resourceId: res.id },
@@ -174,7 +247,7 @@ export function createAdminEngine(options: AdminEngineOptions): AdminEngine {
     const target = recordId === undefined
       ? { moduleId: reg.module.id, resourceId: reg.resource.id }
       : { moduleId: reg.module.id, resourceId: reg.resource.id, recordId };
-    const allowed = await checkPermission(options.authorize, { actor, permission: reg.readPermission, target });
+    const allowed = await checkPermission(authorizeFor(req), { actor, permission: reg.readPermission, target });
     if (!allowed) {
       await writeAudit(
         {
@@ -256,7 +329,8 @@ export function createAdminEngine(options: AdminEngineOptions): AdminEngine {
       throw new AdminError('INTERNAL');
     }
     // Never trust the host to respect the limit; enforce it on output too.
-    const items = result.items.slice(0, query.limit).map((item) => sanitizeRecord(item, reg.resource));
+    const onMismatch = mismatchReporter(req, reg);
+    const items = result.items.slice(0, query.limit).map((item) => sanitizeRecord(item, reg.resource, onMismatch));
     const nextCursor = typeof result.nextCursor === 'string' && result.nextCursor.length > 0 ? result.nextCursor : null;
     const page: { limit: number; nextCursor: string | null; total?: number } = { limit: query.limit, nextCursor };
     if (typeof result.total === 'number' && Number.isFinite(result.total)) page.total = result.total;
@@ -300,7 +374,7 @@ export function createAdminEngine(options: AdminEngineOptions): AdminEngine {
       );
       throw new AdminError('NOT_FOUND');
     }
-    const data = sanitizeRecord(record, reg.resource);
+    const data = sanitizeRecord(record, reg.resource, mismatchReporter(req, reg));
     await writeAudit(
       { actorId: actor.id, action, outcome: 'success', requestId: req.requestId, resourceType: reg.resource.id, resourceId: recordId, tenantId: actor.tenantId },
       true,

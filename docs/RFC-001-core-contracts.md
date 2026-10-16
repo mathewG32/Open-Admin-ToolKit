@@ -71,7 +71,19 @@ Repeated parameters (`?limit=1&limit=100`) get `400`. The engine also enforces `
 
 `get` returns `null` when a record doesn't exist **or** is outside the actor's scope. Both produce the same `404`.
 
-Handlers run under a timeout (default 10 s, configurable per resource up to 120 s), with an `AbortSignal` that fires on timeout or client disconnect.
+Handlers run under a timeout (default 10 s, configurable per resource up to 120 s), with an `AbortSignal` that fires on timeout or client disconnect. The timeout bounds the *request*. Stopping the underlying work requires the handler to honor the signal (see security.md › Cancellation).
+
+Output values must match the declared field type. Mismatches are sent as `null` and reported once per field per request through `onInternalError`.
+
+### 5.3a Host callback bounds
+
+`authenticate`, `authorize`, and `audit` are each bounded by `callbackTimeoutMs` (default 5 s, 1–60000):
+
+| Callback | On timeout |
+|---|---|
+| `authenticate` | `504 TIMEOUT`, audited as an `error` |
+| `authorize` | Denial (`403`), reported to `onInternalError` |
+| `audit` | Sink failure, so `503` for successful reads in fail-closed mode; denials stay denials |
 
 ### 5.4 Modules
 
@@ -79,7 +91,7 @@ Handlers run under a timeout (default 10 s, configurable per resource up to 120 
 { id, label, permissions: Permission[], resources: AdminResource[], enabled?: boolean }
 ```
 
-At startup the registry checks: unique module IDs, unique resource IDs across modules, safe ID patterns, that each resource's read permission is declared by its module, that `idField` is among the declared fields, and valid field types. **Disabled modules are still validated**, but they are not indexed. Their resources then return the same `404` as a resource that never existed, and they don't appear in navigation.
+After validation, the registry keeps **deeply frozen snapshots** of modules, resources, and field definitions, so later mutation of the host's original objects has no effect. At startup the registry checks: unique module IDs, unique resource IDs across modules, safe ID patterns, that each resource's read permission is declared by its module, that `idField` is among the declared fields, and valid field types. **Disabled modules are still validated**, but they are not indexed. Their resources then return the same `404` as a resource that never existed, and they don't appear in navigation.
 
 ### 5.5 Errors
 
@@ -89,7 +101,7 @@ At startup the registry checks: unique module IDs, unique resource IDs across mo
 | `FORBIDDEN` | 403 | Authenticated, not permitted |
 | `NOT_FOUND` | 404 | Unknown resource or record, out-of-scope record, disabled module |
 | `BAD_REQUEST` | 400 | Invalid query. `details.param` and `details.reason` are included. |
-| `TIMEOUT` | 504 | Host handler exceeded `timeoutMs` |
+| `TIMEOUT` | 504 | Host handler exceeded `timeoutMs`, or `authenticate` exceeded `callbackTimeoutMs` |
 | `UNAVAILABLE` | 503 | Audit sink failed while in fail-closed mode |
 | `INTERNAL` | 500 | Anything else. The message is always generic. |
 

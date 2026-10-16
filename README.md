@@ -11,7 +11,7 @@ A small, self-hosted admin toolkit for TypeScript/Express apps. You plug in **yo
 - **Headless core** (`@openadminkit/core`): module registry, deny-by-default authorization, bounded list/get queries, field allowlisting, safe errors, timeouts, and redacted audit events.
 - **Express adapter** (`@openadminkit/express`): a router you mount under your own path, with `401` / `403` / `404` / `400` / `503` handling, request IDs, `no-store` headers, and `405` for any write method.
 - **Example app** (`examples/express-basic`): cookie sessions, three staff roles, 120 fake users, a metrics module, and an audit-log viewer.
-- **111 tests** covering the security cases from the blueprint's threat model.
+- **122 tests** covering the security cases from the blueprint's threat model, plus a **packed-package test** that installs the real tarballs into an app outside the repo.
 
 Not built yet: the React dashboard, mutating actions, the `@openadminkit/testing` package, and Next.js/Prisma adapters. See [ROADMAP.md](ROADMAP.md).
 
@@ -40,7 +40,8 @@ curl -b jar  localhost:3000/internal/admin/api/resources/audit-events           
 Run every check:
 
 ```bash
-pnpm check   # build + typecheck + lint + test
+pnpm check       # build + typecheck + lint + test
+pnpm test:pack   # pack, install into an external app, typecheck, and hit it over HTTP
 ```
 
 ## Adding it to your own Express app
@@ -59,7 +60,7 @@ const users = defineResource({
     email: { type: 'string', filterable: true },
     createdAt: { type: 'date', sortable: true },
   },
-  list: (ctx, query) => myUserService.listForAdmin(ctx.actor, query),  // query is already validated + bounded
+  list: (ctx, query) => myUserService.listForAdmin(ctx.actor, query),  // query is validated + bounded; AND your tenant scope separately
   get: (ctx, id) => myUserService.findForAdmin(ctx.actor, id),         // return null if missing OR out of scope
 });
 
@@ -90,6 +91,9 @@ app.use('/internal/admin/api', createExpressAdmin({
 - **Deny by default.** Only a literal `true` from your `authorize` function grants access. Throws, rejections, `undefined`, and `"yes"` all deny.
 - **Allowlisted output.** Records are projected onto the declared `fields`, so a `passwordHash` your query happens to return is dropped.
 - **Strict input.** Unknown params, undeclared filters and sorts, repeated params, oversized values, and control characters all get `400`.
+- **Typed output.** Values must match their declared type, or they're sent as `null`.
+- **Bounded callbacks.** A hanging session store, policy check, or audit sink can't hang the request. A hanging policy check means denial.
+- **Frozen config.** Definitions are snapshotted at startup, so mutating them later does nothing.
 - **Audit fail-closed.** If a success event can't be written, the data isn't returned (`503`). This is configurable.
 - **No raw errors.** Database and provider errors become a generic `500`. Your `onInternalError` hook gets the real error.
 

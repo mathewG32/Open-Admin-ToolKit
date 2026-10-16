@@ -1,5 +1,5 @@
 import { AdminError } from './errors.js';
-import type { AdminResource, ListQuery, SortSpec } from './types.js';
+import type { AdminResource, FieldType, ListQuery, SortSpec } from './types.js';
 
 export const DEFAULT_LIMIT = 25;
 export const MAX_LIMIT = 100;
@@ -107,22 +107,49 @@ export function parseRecordId(raw: unknown): string {
 
 type SafeValue = string | number | boolean | null;
 
+/** Coerces a value to its declared field type, or null if it doesn't match. Never converts across types. */
+function coerce(type: FieldType, v: unknown): SafeValue {
+  if (v === null || v === undefined) return null;
+  switch (type) {
+    case 'string':
+      return typeof v === 'string' ? v : null;
+    case 'number':
+      return typeof v === 'number' && Number.isFinite(v) ? v : null;
+    case 'boolean':
+      return typeof v === 'boolean' ? v : null;
+    case 'date': {
+      const d = v instanceof Date ? v : typeof v === 'string' ? new Date(v) : null;
+      return d && !Number.isNaN(d.getTime()) ? d.toISOString() : null;
+    }
+  }
+}
+
 /**
  * Projects a host record onto the resource's declared fields.
- * Undeclared keys (password hashes, tokens, internal flags) are dropped.
- * Dates become ISO strings; nested objects/arrays/functions are dropped.
+ *
+ * - Undeclared keys (password hashes, tokens, internal flags) are dropped.
+ * - Declared keys the record doesn't own are omitted.
+ * - Values must match the declared type exactly; mismatches become `null`
+ *   (a `string` field holding an object, a `number` field holding "42", NaN, Infinity…).
+ * - `date` fields accept Date objects or parseable strings and are returned as ISO-8601 UTC.
+ *
+ * Pass `onMismatch` to find out when a host returns the wrong type.
  */
-export function sanitizeRecord(record: unknown, resource: AdminResource): Record<string, SafeValue> {
+export function sanitizeRecord(
+  record: unknown,
+  resource: AdminResource,
+  onMismatch?: (field: string, expected: FieldType) => void,
+): Record<string, SafeValue> {
   const out: Record<string, SafeValue> = {};
   if (typeof record !== 'object' || record === null) return out;
   const src = record as Record<string, unknown>;
   for (const field of Object.keys(resource.fields)) {
     if (!Object.hasOwn(src, field)) continue;
-    const v = src[field];
-    if (v === null || typeof v === 'string' || typeof v === 'boolean') out[field] = v;
-    else if (typeof v === 'number') out[field] = Number.isFinite(v) ? v : null;
-    else if (v instanceof Date) out[field] = Number.isNaN(v.getTime()) ? null : v.toISOString();
-    // anything else (objects, arrays, functions, bigint, symbol, undefined) is omitted
+    const def = resource.fields[field]!;
+    const raw = src[field];
+    const value = coerce(def.type, raw);
+    if (value === null && raw !== null && raw !== undefined) onMismatch?.(field, def.type);
+    out[field] = value;
   }
   return out;
 }

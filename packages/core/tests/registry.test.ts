@@ -39,6 +39,31 @@ describe('createRegistry', () => {
     expect(reg.getResource('constructor')).toBeUndefined();
   });
 
+  it('snapshots definitions: mutating the original after registration changes nothing', () => {
+    const { module } = makeUsersModule();
+    const reg = createRegistry([module]);
+    const original = module.resources[0] as { fields: Record<string, { filterable?: boolean }>; permissionPrefix: string };
+    original.fields.createdAt!.filterable = true;
+    original.fields.passwordHash = { type: 'string' } as never;
+    original.permissionPrefix = 'public';
+    const snap = reg.getResource('users')!.resource;
+    expect(snap.fields.createdAt!.filterable).toBeUndefined();
+    expect(snap.fields).not.toHaveProperty('passwordHash');
+    expect(snap.permissionPrefix).toBe('users');
+  });
+
+  it('deeply freezes registered modules, resources, and fields', () => {
+    const reg = createRegistry([makeUsersModule().module]);
+    const { module, resource } = reg.getResource('users')!;
+    expect(Object.isFrozen(module)).toBe(true);
+    expect(Object.isFrozen(module.permissions)).toBe(true);
+    expect(Object.isFrozen(module.resources)).toBe(true);
+    expect(Object.isFrozen(resource)).toBe(true);
+    expect(Object.isFrozen(resource.fields)).toBe(true);
+    expect(Object.isFrozen(resource.fields.email)).toBe(true);
+    expect(() => { (resource.fields.email as { filterable: boolean }).filterable = false; }).toThrow(TypeError);
+  });
+
   it('rejects duplicate module ids', () => {
     const m = makeUsersModule().module;
     expect(() => createRegistry([m, { ...m, resources: [] }])).toThrow(/Duplicate module id "users"/);

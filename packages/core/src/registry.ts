@@ -1,5 +1,5 @@
 import { isValidPermission } from './permissions.js';
-import type { AdminModule, AdminResource, Permission } from './types.js';
+import type { AdminModule, AdminResource, FieldDef, Permission } from './types.js';
 
 const ID_PATTERN = /^[a-z][a-z0-9-]{0,62}$/;
 const FIELD_PATTERN = /^[A-Za-z_][A-Za-z0-9_]{0,62}$/;
@@ -36,6 +36,34 @@ export function defineAdminModule(module: AdminModule): AdminModule {
 /** Identity helper that gives resource definitions full type checking. */
 export function defineResource<T extends Record<string, unknown>>(resource: AdminResource<T>): AdminResource {
   return resource as unknown as AdminResource;
+}
+
+/**
+ * Copies a validated resource into a deeply frozen snapshot. Later mutation of
+ * the host's original object (e.g. flipping `filterable` on a field, swapping
+ * `permissionPrefix`) cannot change what was validated.
+ */
+function snapshotResource(res: AdminResource): AdminResource {
+  const fields: Record<string, FieldDef> = {};
+  for (const name of Object.keys(res.fields)) {
+    const def = res.fields[name]!;
+    const copy: { -readonly [K in keyof FieldDef]: FieldDef[K] } = { type: def.type };
+    if (def.label !== undefined) copy.label = String(def.label);
+    if (def.filterable === true) copy.filterable = true;
+    if (def.sortable === true) copy.sortable = true;
+    fields[name] = Object.freeze(copy);
+  }
+  const snap: { -readonly [K in keyof AdminResource]: AdminResource[K] } = {
+    id: res.id,
+    label: res.label,
+    permissionPrefix: res.permissionPrefix,
+    idField: res.idField,
+    fields: Object.freeze(fields),
+    list: res.list,
+  };
+  if (res.get !== undefined) snap.get = res.get;
+  if (res.timeoutMs !== undefined) snap.timeoutMs = res.timeoutMs;
+  return Object.freeze(snap);
 }
 
 function validateResource(mod: AdminModule, res: AdminResource, declared: ReadonlySet<string>): Permission {
@@ -77,7 +105,8 @@ function validateResource(mod: AdminModule, res: AdminResource, declared: Readon
 }
 
 /**
- * Validates every module (enabled or not) and indexes the enabled ones.
+ * Validates every module (enabled or not) and indexes deeply frozen snapshots
+ * of the enabled ones.
  * Throws RegistryError with a descriptive message on any problem, so
  * misconfiguration fails at startup rather than silently at request time.
  */
@@ -107,7 +136,7 @@ export function createRegistry(modules: readonly AdminModule[]): AdminRegistry {
     if (!Array.isArray(mod.resources)) throw new RegistryError(`module "${mod.id}": resources must be an array.`);
 
     const isEnabled = mod.enabled !== false;
-    const pending: RegisteredResource[] = [];
+    const snapshots: { resource: AdminResource; readPermission: Permission }[] = [];
     for (const res of mod.resources) {
       const readPermission = validateResource(mod, res, declared);
       const owner = resourceOwners.get(res.id);
@@ -115,12 +144,21 @@ export function createRegistry(modules: readonly AdminModule[]): AdminRegistry {
         throw new RegistryError(`Duplicate resource id "${res.id}" in modules "${owner}" and "${mod.id}".`);
       }
       resourceOwners.set(res.id, mod.id);
-      pending.push(Object.freeze({ module: mod, resource: res, readPermission }));
+      snapshots.push({ resource: snapshotResource(res), readPermission });
     }
 
     if (isEnabled) {
-      enabled.push(mod);
-      for (const r of pending) index.set(r.resource.id, r);
+      const frozenModule: AdminModule = Object.freeze({
+        id: mod.id,
+        label: String(mod.label),
+        permissions: Object.freeze([...mod.permissions]),
+        resources: Object.freeze(snapshots.map((s) => s.resource)),
+        enabled: true,
+      });
+      enabled.push(frozenModule);
+      for (const s of snapshots) {
+        index.set(s.resource.id, Object.freeze({ module: frozenModule, resource: s.resource, readPermission: s.readPermission }));
+      }
     }
   }
 

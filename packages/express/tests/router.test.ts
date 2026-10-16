@@ -144,6 +144,42 @@ describe('spoofing and tenancy', () => {
     expect(res.status).toBe(401);
   });
 
+  it('rejects a client-supplied tenant filter when tenantId is not a declared filter', async () => {
+    const { app } = buildApp();
+    for (const q of ['filter[tenantId]=t-b', 'filter[tenantId]=t-a', 'tenantId=t-b']) {
+      const res = await request(app).get(`${BASE}/resources/users?${q}`).set(asAdmin);
+      expect([q, res.status]).toEqual([q, 400]);
+    }
+  });
+
+  it('safe pattern: even if tenantId IS filterable, scope is ANDed and cannot be overridden', async () => {
+    // Mirrors the recipe in docs/getting-started.md: scope is applied separately from client filters.
+    type R = { id: string; tenantId: string };
+    const rows: R[] = [{ id: 'a1', tenantId: 't-a' }, { id: 'b1', tenantId: 't-b' }];
+    const leaky = defineResource<R>({
+      id: 'scoped',
+      label: 'Scoped',
+      permissionPrefix: 'users',
+      idField: 'id',
+      fields: { id: { type: 'string' }, tenantId: { type: 'string', filterable: true } },
+      async list(ctx, q) {
+        const scope = (r: R) => r.tenantId === ctx.actor.tenantId; // server-enforced
+        const clientFilters = (r: R) => Object.entries(q.filters).every(([k, v]) => String(r[k as keyof R]) === v);
+        return { items: rows.filter((r) => scope(r) && clientFilters(r)) };
+      },
+    });
+    const app = express();
+    app.use(BASE, createExpressAdmin({
+      authenticate: hostAuthenticate,
+      authorize: createRolePolicy({ admin: ['users.read'] }),
+      audit: () => {},
+      modules: [defineAdminModule({ id: 'scoped', label: 'Scoped', permissions: ['users.read'], resources: [leaky] })],
+    }));
+    const res = await request(app).get(`${BASE}/resources/scoped?filter[tenantId]=t-b`).set(asAdmin);
+    expect(res.status).toBe(200);
+    expect(res.body.data).toEqual([]); // t-a AND t-b → nothing, never b1
+  });
+
   it('cannot read another tenant\'s records', async () => {
     const { app } = buildApp();
     // u2 belongs to tenant t-b; admin-1 is verified for t-a.

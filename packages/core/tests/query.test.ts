@@ -79,9 +79,21 @@ describe('sanitizeRecord', () => {
     expect(JSON.stringify(out)).not.toMatch(/SECRET/);
   });
 
-  it('serializes dates and drops nested objects', () => {
+  it('serializes dates and nulls nested objects', () => {
     const out = sanitizeRecord({ id: 'x', createdAt: new Date('2026-01-01T00:00:00Z'), email: { nested: 'leak' } }, resource);
-    expect(out).toEqual({ id: 'x', createdAt: '2026-01-01T00:00:00.000Z' });
+    expect(out).toEqual({ id: 'x', createdAt: '2026-01-01T00:00:00.000Z', email: null });
+  });
+
+  it('enforces declared types and reports mismatches', () => {
+    const typed = { ...resource, fields: { s: { type: 'string' }, n: { type: 'number' }, b: { type: 'boolean' }, d: { type: 'date' } } } as typeof resource;
+    const mismatches: string[] = [];
+    const report = (f: string) => mismatches.push(f);
+    expect(sanitizeRecord({ s: 42, n: '42', b: 'true', d: 'not a date' }, typed, report)).toEqual({ s: null, n: null, b: null, d: null });
+    expect(mismatches).toEqual(['s', 'n', 'b', 'd']);
+    expect(sanitizeRecord({ n: Number.NaN, d: '2026-10-16' }, typed)).toEqual({ n: null, d: '2026-10-16T00:00:00.000Z' });
+    mismatches.length = 0;
+    expect(sanitizeRecord({ s: 'ok', n: 1, b: false, d: null }, typed, report)).toEqual({ s: 'ok', n: 1, b: false, d: null });
+    expect(mismatches).toEqual([]);
   });
 
   it('ignores inherited properties', () => {

@@ -240,6 +240,69 @@ describe('auditing', () => {
   });
 });
 
+describe('callback timeouts', () => {
+  const never = () => new Promise<never>(() => {});
+  const op = { authenticate: () => admin, requestId: 'r', signal: new AbortController().signal, operation: listUsers };
+
+  it('authenticate that never settles → 504, handler not called', async () => {
+    const { module, calls } = makeUsersModule();
+    const onInternalError = vi.fn();
+    const engine = createAdminEngine({ authorize: policy, audit: () => {}, modules: [module], callbackTimeoutMs: 20, onInternalError });
+    const res = await engine.handle({ ...op, authenticate: never });
+    expect(res.status).toBe(504);
+    expect(calls.list).toBe(0);
+    expect(String(onInternalError.mock.calls[0]?.[0])).toMatch(/authenticate.*20ms/);
+  });
+
+  it('authorize that never settles → 403 (deny), handler not called, timeout reported', async () => {
+    const { module, calls } = makeUsersModule();
+    const onInternalError = vi.fn();
+    const engine = createAdminEngine({ authorize: never, audit: () => {}, modules: [module], callbackTimeoutMs: 20, onInternalError });
+    const res = await engine.handle(op);
+    expect(res.status).toBe(403);
+    expect(calls.list).toBe(0);
+    expect(String(onInternalError.mock.calls[0]?.[0])).toMatch(/authorize/);
+  });
+
+  it('audit sink that never settles → 503 in fail-closed mode (no data returned)', async () => {
+    const { module } = makeUsersModule();
+    const onAuditFailure = vi.fn();
+    const engine = createAdminEngine({ authorize: policy, audit: never, modules: [module], callbackTimeoutMs: 20, onAuditFailure });
+    const res = await engine.handle(op);
+    expect(res.status).toBe(503);
+    expect(res.body).not.toHaveProperty('data');
+    expect(onAuditFailure).toHaveBeenCalled();
+  });
+
+  it('a hanging audit sink does not turn a denial into anything but a denial', async () => {
+    const { module } = makeUsersModule();
+    const engine = createAdminEngine({ authorize: policy, audit: never, modules: [module], callbackTimeoutMs: 20 });
+    expect((await engine.handle({ ...op, authenticate: () => support })).status).toBe(403);
+  });
+
+  it('rejects invalid callbackTimeoutMs', () => {
+    const { module } = makeUsersModule();
+    for (const callbackTimeoutMs of [0, -1, 1.5, 120_000]) {
+      expect(() => createAdminEngine({ authorize: policy, audit: () => {}, modules: [module], callbackTimeoutMs })).toThrow(/callbackTimeoutMs/);
+    }
+  });
+});
+
+describe('output types', () => {
+  it('nulls wrongly typed host values and reports them once per field', async () => {
+    const { module } = makeUsersModule();
+    const sloppy = defineResource({
+      ...module.resources[0]!,
+      list: async () => ({ items: [{ id: 1, email: { raw: 'x' } }, { id: 2, email: ['y'] }] }),
+    });
+    const onInternalError = vi.fn();
+    const engine = createAdminEngine({ authorize: policy, audit: () => {}, modules: [{ ...module, resources: [sloppy] }], onInternalError });
+    const res = await engine.handle({ authenticate: () => admin, requestId: 'r', signal: new AbortController().signal, operation: listUsers });
+    expect((res.body as { data: unknown[] }).data).toEqual([{ id: null, email: null }, { id: null, email: null }]);
+    expect(onInternalError).toHaveBeenCalledTimes(2); // id + email, not once per row
+  });
+});
+
 describe('configuration', () => {
   it('requires authorize and audit', () => {
     const { module } = makeUsersModule();
